@@ -72,7 +72,7 @@ def collate(batch):
 ###############################################################################
 class Net(nn.Module):
     def __init__(self, nc, conv=(64,128)):
-        super().__init__(); self.pre=PreprocessLayer(emg_rate=250,target_rate=100)
+        super().__init__(); self.pre=PreprocessLayer(emg_rate=cfg.emg_rate ,target_rate=100, use_wavelet=True)
         self.conv = nn.Sequential(nn.Conv1d(21,conv[0],5,padding=2), nn.BatchNorm1d(conv[0]), nn.ReLU(),
                                   nn.Conv1d(conv[0],conv[1],5,padding=2), nn.BatchNorm1d(conv[1]), nn.ReLU())
         self.lstm=nn.LSTM(conv[1],64,2,batch_first=True,bidirectional=True,dropout=0.3)
@@ -87,7 +87,7 @@ class Net(nn.Module):
 ###############################################################################
 @dataclass
 class CFG:
-    root:str; classes:int; batch:int=16; workers:int=4; epochs:int=50; lr:float=1e-3; val:float=0.2; patience:int=8; wd:float=1e-4
+    root:str; classes:int; batch:int=16; workers:int=4; epochs:int=50; lr:float=1e-3; val:float=0.2; patience:int=8; wd:float=1e-4; emg_rate: int=500,
 
 ###############################################################################
 # 6. Train
@@ -153,7 +153,10 @@ if __name__=='__main__':
     ap.add_argument('--patience',type=int, default=8)
     ap.add_argument('--workers', type=int, default=4)
     ap.add_argument('--wd',     type=float, default=1e-4)
+    ap.add_argument("--emg-rate", type=int, default=500,
+                   help="Frecuencia EMG para preprocesado (Hz)")
     args=ap.parse_args()
     cfg=CFG(root=args.root, classes=args.classes, batch=args.batch, workers=args.workers,
-            epochs=args.epochs, lr=args.lr, val=args.val, patience=args.patience, wd=args.wd)
+            epochs=args.epochs, lr=args.lr, val=args.val, patience=args.patience, wd=args.wd,
+            emg_rate=args.emg_rate)
     train(cfg)

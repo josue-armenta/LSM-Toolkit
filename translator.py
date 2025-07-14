@@ -40,7 +40,7 @@ from gforce import DataNotifFlags, GForceProfile, NotifDataType
 
 DEFAULT_ADDRESS = "90:7B:C6:63:4C:B8"
 DEFAULT_MODEL   = "best_signnet.pt"
-EMG_RATE   = 250  # Hz
+EMG_RATE   = 500  # Hz
 IMU_RATE   = 100  # Hz
 WINDOW_SEC = 1
 EMG_LEN    = int(WINDOW_SEC * EMG_RATE)

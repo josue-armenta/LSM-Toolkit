@@ -17,7 +17,7 @@ from gforce import DataNotifFlags, GForceProfile, NotifDataType
 # 1. Parámetros por defecto
 # ----------------------------
 DEFAULT_ADDRESS = "90:7B:C6:63:4C:B8"
-DEFAULT_EMG_RATE = 250   # Hz
+DEFAULT_EMG_RATE = 500   # Hz
 IMU_RATE         = 100   # Hz
 
 # ------------------------------------
@@ -171,7 +171,7 @@ def main():
     p.add_argument("--reps",     type=int, default=10,
                    help="Número de repeticiones (default: 1)")
     p.add_argument("--emg-rate", type=int, default=DEFAULT_EMG_RATE,
-                   help="Frecuencia EMG (Hz), entre 250–300)")
+                   help="Frecuencia EMG (Hz), entre 250–500)")
     args = p.parse_args()
 
     asyncio.run(capture_loop(args))
