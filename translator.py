@@ -31,7 +31,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from preprocessor import PreprocessLayer
+from model import SignNet
 from gforce import DataNotifFlags, GForceProfile, NotifDataType
 
 ###############################################################################
@@ -77,29 +77,6 @@ def on_data_raw(_, data: bytearray):
 ###############################################################################
 
 
-class SignNet(nn.Module):
-    def __init__(self, num_classes, conv_ch=(64, 128)):
-        super().__init__()
-        self.prep = PreprocessLayer(emg_rate=EMG_RATE,target_rate=100)
-        self.conv = nn.Sequential(
-            nn.Conv1d(21, conv_ch[0], kernel_size=5, padding=2),
-            nn.BatchNorm1d(conv_ch[0]), nn.ReLU(),
-            nn.Conv1d(conv_ch[0], conv_ch[1], kernel_size=5, padding=2),
-            nn.BatchNorm1d(conv_ch[1]), nn.ReLU(),
-        )
-        self.lstm = nn.LSTM(conv_ch[1], 64, num_layers=2, batch_first=True,
-                            bidirectional=True, dropout=0.3)
-        self.attn = nn.Linear(128, 1, bias=False)
-        self.cls  = nn.Linear(128, num_classes)
-
-    def forward(self, batch):
-        emg, acc, gyro, euler, quat = batch
-        x = self.prep(emg, acc, gyro, euler, quat)
-        x = self.conv(x).transpose(1, 2)
-        h, _ = self.lstm(x)
-        alpha = torch.softmax(self.attn(h), dim=1)
-        ctx = (alpha * h).sum(dim=1)
-        return self.cls(ctx)
 
 ###############################################################################
 # Carga de modelo y etiquetas

@@ -18,7 +18,7 @@ import h5py, numpy as np, torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
-from preprocessor import PreprocessLayer
+from model import SignNet
 
 # reproducibilidad
 SEED = 42
@@ -67,20 +67,12 @@ def collate(batch):
 ###############################################################################
 
 
+
 ###############################################################################
 # 4. Model
 ###############################################################################
-class Net(nn.Module):
-    def __init__(self, nc, conv=(64,128)):
-        super().__init__(); self.pre=PreprocessLayer(emg_rate=cfg.emg_rate, target_rate=100, use_wavelet=True)
-        self.conv = nn.Sequential(nn.Conv1d(21,conv[0],5,padding=2), nn.BatchNorm1d(conv[0]), nn.ReLU(),
-                                  nn.Conv1d(conv[0],conv[1],5,padding=2), nn.BatchNorm1d(conv[1]), nn.ReLU())
-        self.lstm=nn.LSTM(conv[1],64,2,batch_first=True,bidirectional=True,dropout=0.3)
-        self.att = nn.Linear(128,1,bias=False); self.fc=nn.Linear(128,nc)
-    def forward(self,b):
-        x=self.pre(*b); x=self.conv(x).transpose(1,2); h,_=self.lstm(x)
-        w=torch.softmax(self.att(h),1)
-        return self.fc((w*h).sum(1))
+
+
 
 ###############################################################################
 # 5. Config
@@ -117,7 +109,7 @@ def train(cfg:CFG):
         collate_fn=collate,
         pin_memory=pin
     )
-    net=Net(cfg.classes).to(dev); opt=torch.optim.AdamW(net.parameters(),cfg.lr,weight_decay=cfg.wd); ce=nn.CrossEntropyLoss()
+    net=SignNet(cfg.classes, use_wavelets=True).to(dev); opt=torch.optim.AdamW(net.parameters(),cfg.lr,weight_decay=cfg.wd); ce=nn.CrossEntropyLoss()
     best,bad=float('inf'),0
     for ep in range(1,cfg.epochs+1):
         net.train(); tl=0

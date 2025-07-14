@@ -73,7 +73,7 @@ graph LR;
 1. **Clona** este repositorio y entra al directorio:
 
    ```bash
-   git clone https://github.com/<user>/lsm-toolkit.git
+   git clone https://github.com/josue-armenta/lsm-toolkit.git
    cd lsm-toolkit
    ```
 2. **Configura** un entorno virtual (opcional pero recomendado).
