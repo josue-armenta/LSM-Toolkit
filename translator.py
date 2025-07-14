@@ -42,7 +42,7 @@ DEFAULT_ADDRESS = "90:7B:C6:63:4C:B8"
 DEFAULT_MODEL   = "best_signnet.pt"
 EMG_RATE   = 500  # Hz
 IMU_RATE   = 100  # Hz
-WINDOW_SEC = 1
+WINDOW_SEC = 0.8
 EMG_LEN    = int(WINDOW_SEC * EMG_RATE)
 IMU_LEN    = int(WINDOW_SEC * IMU_RATE)
 
@@ -80,7 +80,7 @@ def on_data_raw(_, data: bytearray):
 class SignNet(nn.Module):
     def __init__(self, num_classes, conv_ch=(64, 128)):
         super().__init__()
-        self.prep = PreprocessLayer(emg_rate=250,target_rate=100)
+        self.prep = PreprocessLayer(emg_rate=EMG_RATE,target_rate=100)
         self.conv = nn.Sequential(
             nn.Conv1d(21, conv_ch[0], kernel_size=5, padding=2),
             nn.BatchNorm1d(conv_ch[0]), nn.ReLU(),
@@ -259,6 +259,7 @@ def main():
     p.add_argument("--labels", default="labels.txt", help="Archivo con nombres de clase")
     p.add_argument("--interval", type=float, default=0.2, help="Segundos entre inferencias")
     p.add_argument("--debug", action="store_true", help="Muestra info de depuración")
+    p.add_argument("--emg-rate", type=int, default=EMG_RATE, help="Frecuencia EMG (Hz) para preprocesado")
     args = p.parse_args()
     asyncio.run(run(args))
 

@@ -72,7 +72,7 @@ def collate(batch):
 ###############################################################################
 class Net(nn.Module):
     def __init__(self, nc, conv=(64,128)):
-        super().__init__(); self.pre=PreprocessLayer(emg_rate=cfg.emg_rate ,target_rate=100, use_wavelet=True)
+        super().__init__(); self.pre=PreprocessLayer(emg_rate=cfg.emg_rate, target_rate=100, use_wavelet=True)
         self.conv = nn.Sequential(nn.Conv1d(21,conv[0],5,padding=2), nn.BatchNorm1d(conv[0]), nn.ReLU(),
                                   nn.Conv1d(conv[0],conv[1],5,padding=2), nn.BatchNorm1d(conv[1]), nn.ReLU())
         self.lstm=nn.LSTM(conv[1],64,2,batch_first=True,bidirectional=True,dropout=0.3)

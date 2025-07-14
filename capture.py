@@ -171,7 +171,7 @@ def main():
     p.add_argument("--reps",     type=int, default=10,
                    help="Número de repeticiones (default: 1)")
     p.add_argument("--emg-rate", type=int, default=DEFAULT_EMG_RATE,
-                   help="Frecuencia EMG (Hz), entre 250–500)")
+                   help="Frecuencia EMG (Hz), entre 250-500 (default:500)")
     args = p.parse_args()
 
     asyncio.run(capture_loop(args))
