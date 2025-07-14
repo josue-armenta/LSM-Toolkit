@@ -1,13 +1,9 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-translator.py – Streaming continuo y depuración  
+translator.py – Streaming continuo y depuración
+Con suavizado/votación sobre N predicciones y umbral de confianza
 Autor: ChatGPT – julio 2025
-
-Conecta al brazalete **gForce Pro+**, inicia automáticamente el streaming tras la
-calibración y muestra en tiempo real el gesto más probable usando el modelo
-`best_signnet.pt`. Ahora usa tasa EMG fija en 500 Hz y extrae las etiquetas
-directamente del checkpoint (clave `'gestures'`).
 """
 
 import argparse
@@ -15,7 +11,7 @@ import asyncio
 import collections
 import struct
 import time
-from typing import Deque, List, Optional
+from typing import Deque, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -27,7 +23,7 @@ from gforce import DataNotifFlags, GForceProfile, NotifDataType
 # Parámetros de señal y buffers
 DEFAULT_ADDRESS = "90:7B:C6:63:4C:B8"
 DEFAULT_MODEL   = "best_signnet.pt"
-EMG_RATE   = 500   # Hz (constante fija)
+EMG_RATE   = 500   # Hz
 IMU_RATE   = 100   # Hz
 WINDOW_SEC = 0.8
 EMG_LEN    = int(WINDOW_SEC * EMG_RATE)
@@ -39,8 +35,8 @@ buf_gyr:   Deque[tuple] = collections.deque(maxlen=IMU_LEN)
 buf_euler: Deque[tuple] = collections.deque(maxlen=IMU_LEN)
 buf_quat:  Deque[tuple] = collections.deque(maxlen=IMU_LEN)
 
-# Callback BLE → buffers
 def on_data_raw(_, data: bytearray):
+    """Callback BLE → buffers."""
     ts = time.time()
     k  = data[0]
     p  = data[1:]
@@ -56,12 +52,17 @@ def on_data_raw(_, data: bytearray):
     elif k == NotifDataType.NTF_QUAT_FLOAT_DATA:
         buf_quat.append((ts, *struct.unpack("<4f", p[:16])))
 
-# Carga de modelo y extracción de etiquetas desde el checkpoint
-def load_model(path: str, device):
+def load_model(path: str, device) -> Tuple[SignNet, int, Optional[List[str]]]:
+    """
+    Carga un checkpoint o módulo completo y extrae:
+      - model: instancia de SignNet en modo eval
+      - n_cls: número de clases
+      - labels (opcional): lista de nombres de gestos
+    """
     obj = torch.load(path, map_location=device)
     labels: Optional[List[str]] = None
 
-    # Caso 1: modelo serializado completo
+    # Caso 1: checkpoint serializado como módulo completo
     if isinstance(obj, nn.Module):
         model = obj.to(device)
         model.eval()
@@ -70,13 +71,12 @@ def load_model(path: str, device):
             labels = getattr(model, 'gestures')
         return model, n_cls, labels
 
-    # Caso 2: diccionario de checkpoint
+    # Caso 2: checkpoint serializado como dict
     if isinstance(obj, dict):
-        # Extrae etiquetas si vienen en 'gestures'
         if 'gestures' in obj:
             labels = obj['gestures']
 
-        # Determina state_dict y num_classes
+        # Detecta dónde está el state_dict y num_classes
         if 'cls.weight' in obj:
             state_dict = obj
             n_cls = state_dict['cls.weight'].shape[0]
@@ -88,38 +88,61 @@ def load_model(path: str, device):
             n_cls = state_dict['cls.weight'].shape[0]
         else:
             raise RuntimeError('Formato de checkpoint no reconocido')
-    else:
-        raise RuntimeError('Checkpoint no es ni Module ni dict')
 
-    # Adaptar nombres de capas antiguas si hace falta
-    rename_map = {
-        'att.weight':    'attn.weight',
-        'fc.weight':     'cls.weight',
-        'fc.bias':       'cls.bias',
-    }
-    for old, new in rename_map.items():
-        if old in state_dict and new not in state_dict:
-            state_dict[new] = state_dict.pop(old)
+        # Renombra capas antiguas si hace falta
+        rename_map = {
+            'att.weight': 'attn.weight',
+            'fc.weight':  'cls.weight',
+            'fc.bias':    'cls.bias',
+        }
+        for old, new in rename_map.items():
+            if old in state_dict and new not in state_dict:
+                state_dict[new] = state_dict.pop(old)
 
-    # Reconstruye y carga pesos
-    model = SignNet(n_cls).to(device)
-    missing, unexpected = model.load_state_dict(state_dict, strict=False)
-    if missing:
-        print(f"⚠ Pesos faltantes: {missing}")
-    if unexpected:
-        print(f"⚠ Pesos inesperados: {unexpected}")
-    model.eval()
-    return model, n_cls, labels
+        # Reconstruye el modelo y carga pesos
+        model = SignNet(n_cls).to(device)
+        missing, unexpected = model.load_state_dict(state_dict, strict=False)
+        if missing:
+            print(f"⚠ Pesos faltantes: {missing}")
+        if unexpected:
+            print(f"⚠ Pesos inesperados: {unexpected}")
+        model.eval()
+        return model, n_cls, labels
 
-# Bucle de inferencia (sin cambios)
-async def inference_loop(model, device, labels, interval, debug):
-    prev_pred = None
+    # Si no es ni Module ni dict
+    raise RuntimeError('Checkpoint no es ni Module ni dict')
+
+async def inference_loop(
+    model, device, labels,
+    interval: float,
+    debug: bool,
+    window_size: int,
+    conf_thresh: float,
+    smoother: str
+):
+    """
+    Ejecuta inferencias cada `interval` s, acumula las últimas
+    `window_size` predicciones y aplica:
+      - media móvil (“ma”)
+      - o voto mayoritario (“vote”)
+    Sólo emite si la confianza ≥ conf_thresh.
+    """
+    prob_buffer = collections.deque(maxlen=window_size)
+    pred_buffer = collections.deque(maxlen=window_size)
+    conf_buffer = collections.deque(maxlen=window_size)
+    prev_out = None
+
+    print(f"➡️ Post-proceso: método={smoother}, ventana={window_size}, umbral={conf_thresh}")
+
     while True:
         await asyncio.sleep(interval)
+
+        # Verifica que haya datos suficientes
         if min(len(buf_emg), len(buf_acc), len(buf_gyr),
                len(buf_euler), len(buf_quat)) < min(EMG_LEN, IMU_LEN):
             continue
 
+        # Construye el batch
         emg_np   = np.array(buf_emg,   dtype=np.float32)[-EMG_LEN:, 1:]
         if emg_np.var() < 1.0:
             if debug:
@@ -131,31 +154,54 @@ async def inference_loop(model, device, labels, interval, debug):
         euler_np = np.array(buf_euler, dtype=np.float32)[-IMU_LEN:, 1:]
         quat_np  = np.array(buf_quat,  dtype=np.float32)[-IMU_LEN:, 1:]
 
-        batch = [torch.from_numpy(x).unsqueeze(0).to(device)
-                 for x in (emg_np, acc_np, gyr_np, euler_np, quat_np)]
+        batch = [
+            torch.from_numpy(x).unsqueeze(0).to(device)
+            for x in (emg_np, acc_np, gyr_np, euler_np, quat_np)
+        ]
         with torch.no_grad():
             logits = model(batch)
             probs  = torch.softmax(logits, dim=1)[0]
             pred   = int(probs.argmax().item())
             conf   = float(probs[pred].item())
 
-        label = labels[pred] if labels else str(pred)
+        prob_buffer.append(probs)
+        pred_buffer.append(pred)
+        conf_buffer.append(conf)
+        if len(pred_buffer) < window_size:
+            continue
 
+        # Selección post-proceso
+        if smoother == "ma":
+            avg_probs = torch.stack(list(prob_buffer), dim=0).mean(dim=0)
+            out_pred = int(avg_probs.argmax().item())
+            out_conf = float(avg_probs[out_pred].item())
+        else:  # voto mayoritario
+            counts = collections.Counter(pred_buffer)
+            maj_pred, count = counts.most_common(1)[0]
+            if count > window_size // 2:
+                idxs = [i for i, p in enumerate(pred_buffer) if p == maj_pred]
+                out_pred = maj_pred
+                out_conf = sum(conf_buffer[i] for i in idxs) / len(idxs)
+            else:
+                continue  # sin mayoría clara
+
+        # Aplica umbral de confianza
+        if out_conf < conf_thresh:
+            continue
+
+        label = labels[out_pred] if labels else str(out_pred)
+
+        # Imprime sólo cuando cambia la clase (o en modo debug)
         if debug:
-            var_emg = float(emg_np.var())
-            top_vals, top_idx = torch.topk(probs, k=min(3, probs.size(0)))
-            top_str = " ".join(
-                f"{labels[i] if labels else i}:{p:.2f}"
-                for p, i in zip(top_vals, top_idx)
-            )
-            print(f"\rvar:{var_emg:5.1f}  {top_str:<30}",
-                  end="", flush=True)
-        elif pred != prev_pred:
-            print(f"\r⏩ {label:<15} ({conf:.2f})            ",
-                  end="", flush=True)
-            prev_pred = pred
+            if smoother == "ma":
+                preds_list = [int(p.argmax().item()) for p in prob_buffer]
+                print(f"\r[MA] preds={preds_list} → {out_pred} ({out_conf:.2f})", end="", flush=True)
+            else:
+                print(f"\r[VOTE] preds={list(pred_buffer)} counts={counts} → {out_pred} ({out_conf:.2f})", end="", flush=True)
+        elif out_pred != prev_out:
+            print(f"\r⏩ {label:<15} ({out_conf:.2f})            ", end="", flush=True)
+            prev_out = out_pred
 
-# Rutina principal
 async def run(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, n_cls, labels = load_model(args.model, device)
@@ -163,26 +209,26 @@ async def run(args):
     prof = GForceProfile()
     print("🔌 Conectando a", args.address, "…")
     await prof.connect(args.address)
-
     print("📐 Calibrando orientación (2 s)…")
     await prof.calibrate_quaternion(duration=2.0)
-
-    await prof.setEmgRawDataConfig(EMG_RATE, 0xFF, 16, 8,
-                                   cb=None, timeout=1000)
-    flags = (DataNotifFlags.DNF_EMG_RAW |
-             DataNotifFlags.DNF_ACCELERATE |
-             DataNotifFlags.DNF_GYROSCOPE |
-             DataNotifFlags.DNF_EULERANGLE |
-             DataNotifFlags.DNF_QUATERNION)
+    await prof.setEmgRawDataConfig(EMG_RATE, 0xFF, 16, 8, cb=None, timeout=1000)
+    flags = (
+        DataNotifFlags.DNF_EMG_RAW |
+        DataNotifFlags.DNF_ACCELERATE |
+        DataNotifFlags.DNF_GYROSCOPE |
+        DataNotifFlags.DNF_EULERANGLE |
+        DataNotifFlags.DNF_QUATERNION
+    )
     await prof.setDataNotifSwitch(flags, cb=None, timeout=1000)
-    await prof.device.start_notify(prof.notifyCharacteristic,
-                                   on_data_raw)
-
+    await prof.device.start_notify(prof.notifyCharacteristic, on_data_raw)
     print("🟢 Streaming – haz un gesto (Ctrl-C para salir)")
 
     try:
-        await inference_loop(model, device, labels,
-                             args.interval, args.debug)
+        await inference_loop(
+            model, device, labels,
+            args.interval, args.debug,
+            args.window_size, args.conf_thresh, args.smoother
+        )
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n🛑 Terminando…")
     finally:
@@ -190,10 +236,9 @@ async def run(args):
         await prof.stopDataNotification()
         await prof.disconnect()
 
-# CLI
 def main():
     p = argparse.ArgumentParser(
-        description="Inferencia LSM gForce Pro+ – stream continuo"
+        description="Inferencia LSM gForce Pro+ – stream contínuo con suavizado/votación"
     )
     p.add_argument("--address", default=DEFAULT_ADDRESS,
                    help="BLE MAC/UUID del brazalete")
@@ -203,6 +248,12 @@ def main():
                    help="Segundos entre inferencias")
     p.add_argument("--debug", action="store_true",
                    help="Muestra info de depuración")
+    p.add_argument("-w", "--window-size", type=int, default=5,
+                   help="Tamaño de ventana para MA/votación")
+    p.add_argument("-t", "--conf-thresh", type=float, default=0.7,
+                   help="Umbral de confianza mínimo para emitir clase")
+    p.add_argument("-s", "--smoother", choices=["ma","vote"], default="vote",
+                   help="Método de post-proceso: 'ma' o 'vote'")
     args = p.parse_args()
     asyncio.run(run(args))
 
