@@ -40,6 +40,12 @@ class PreprocessLayer(nn.Module):
         # Linear interpolation along time axis
         return F.interpolate(x, size=new_t, mode="linear", align_corners=False)
 
+    def _align(self,*tensors: torch.Tensor):
+        # encuentra la longitud mínima
+        T = min(t.size(-1) for t in tensors)
+        # recorta todos al mismo T
+        return [t[..., :T] for t in tensors]
+
     def forward(self,
                 emg: torch.Tensor,
                 acc: torch.Tensor,
@@ -74,6 +80,9 @@ class PreprocessLayer(nn.Module):
         orig_t = emg.shape[-1]
         new_t  = int(orig_t * self.target_rate / self.emg_rate)
         emg_ds = self._interp(emg, new_t)
+
+        # Alineacion
+        emg, acc, gyro, euler, quat = self._align(emg, acc, gyro, euler, quat)
 
         # Combine IMU and resample
         imu    = torch.cat((acc, gyro, euler, quat), dim=1)
