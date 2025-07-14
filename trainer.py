@@ -23,11 +23,14 @@ def set_seed(seed: int = 42):
 class GForceTrialDataset(Dataset):
     _RX = re.compile(r"[\\/](?P<gesture>[^\\/]+)[\\/]session_\d+_sample_\d+\.h5$", re.IGNORECASE)
 
-    def __init__(self, files: List[str], gesture_map: dict):
+    def __init__(self, files: List[str], gesture_map: dict, augment: bool = False):
         if not files:
             raise ValueError("Empty H5 list")
         self.files = files
         self.gesture_map = gesture_map
+        from augment import AUG_PIPE
+        self.augment = augment
+        self.tfm    = AUG_PIPE if augment else None
 
     def __len__(self):
         return len(self.files)
@@ -40,6 +43,14 @@ class GForceTrialDataset(Dataset):
             gyro = torch.from_numpy(f['raw/gyro'][:,1:].astype('f'))
             eul  = torch.from_numpy(f['raw/euler'][:,1:].astype('f'))
             quat = torch.from_numpy(f['raw/quat'][:,1:].astype('f'))
+            
+            if self.tfm is not None:
+                # tsaug espera np.ndarray; conservamos shape (T,C)
+                emg  = torch.from_numpy(self.tfm.augment(emg.numpy()))
+                acc  = torch.from_numpy(self.tfm.augment(acc.numpy()))
+                gyro = torch.from_numpy(self.tfm.augment(gyro.numpy()))
+                # euler y quat suelen ser más estables
+            
         m = self._RX.search(path)
         if m is None:
             raise ValueError(f"Bad path, no gesture folder: {path}")
@@ -97,7 +108,7 @@ def train(cfg: CFG, dev: torch.device):
     # DataLoaders
     pin = (dev.type == 'cuda')
     dl_tr = DataLoader(
-        GForceTrialDataset(tr, gesture_map),
+        GForceTrialDataset(tr, gesture_map, augment=True),
         batch_size=cfg.batch,
         shuffle=True,
         num_workers=cfg.workers,
@@ -105,7 +116,7 @@ def train(cfg: CFG, dev: torch.device):
         pin_memory=pin
     )
     dl_va = DataLoader(
-        GForceTrialDataset(va, gesture_map),
+        GForceTrialDataset(va, gesture_map, augment=False),
         batch_size=cfg.batch,
         shuffle=False,
         num_workers=cfg.workers,
