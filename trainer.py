@@ -1,4 +1,4 @@
-# trainer.py
+# trainer.py — End‑to‑end trainer con CUDA por defecto
 """Entrenador end‑to‑end para gForcePro+ (Wang 2020‑like) — *CLI*
 
 Uso mínimo
@@ -21,8 +21,10 @@ from torch.utils.data import DataLoader, Dataset
 from model import SignNet
 
 # reproducibilidad
-SEED = 42
-random.seed(SEED); np.random.seed(SEED); torch.manual_seed(SEED)
+def set_seed(seed: int = 42):
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
 
 ###############################################################################
 # 1. Dataset
@@ -51,48 +53,48 @@ class GForceTrialDataset(Dataset):
 ###############################################################################
 # 2. Collate
 ###############################################################################
-_pad=lambda x,T: F.pad(x,(0,0,0,T-x.size(0))) if x.size(0)<T else x
+_pad = lambda x, T: F.pad(x, (0,0,0, T - x.size(0))) if x.size(0) < T else x
 
 def collate(batch):
     xs, ys = zip(*batch)
     Te = max(s[0].size(0) for s in xs)
     Ti = max(max(s[j].size(0) for j in range(1,5)) for s in xs)
-    out=[[] for _ in range(5)]
+    out = [[] for _ in range(5)]
     for emg, acc, gyro, eul, quat in xs:
-        out[0].append(_pad(emg,Te)); out[1].append(_pad(acc,Ti)); out[2].append(_pad(gyro,Ti)); out[3].append(_pad(eul,Ti)); out[4].append(_pad(quat,Ti))
+        out[0].append(_pad(emg, Te)); out[1].append(_pad(acc, Ti))
+        out[2].append(_pad(gyro, Ti)); out[3].append(_pad(eul, Ti))
+        out[4].append(_pad(quat, Ti))
     return tuple(torch.stack(z) for z in out), torch.tensor(ys)
 
 ###############################################################################
-# 3. Preprocess
-###############################################################################
-
-
-
-###############################################################################
-# 4. Model
-###############################################################################
-
-
-
-###############################################################################
-# 5. Config
+# 5. Config + Entrenamiento
 ###############################################################################
 @dataclass
 class CFG:
-    root:str; classes:int; batch:int=16; workers:int=4; epochs:int=50; lr:float=1e-3; val:float=0.2; patience:int=8; wd:float=1e-4; emg_rate: int=500,
+    root: str
+    classes: int
+    batch: int = 16
+    workers: int = 4
+    epochs: int = 50
+    lr: float = 1e-3
+    val: float = 0.2
+    patience: int = 8
+    wd: float = 1e-4
+    emg_rate: int = 500
 
-###############################################################################
-# 6. Train
-###############################################################################
+def train(cfg: CFG, dev: torch.device):
+    # Patrón de archivos
+    patt = os.path.join(cfg.root, 'session_*/user_*/phrase_*/rep_*/data.h5')
+    files = sorted(glob.glob(patt))
+    if not files: raise FileNotFoundError('No se encontraron archivos H5')
 
-def _split(lst:List[str],r:float): random.shuffle(lst); k=int((1-r)*len(lst)); return lst[:k],lst[k:]
+    # Split
+    random.shuffle(files)
+    k = int((1 - cfg.val) * len(files))
+    tr, va = files[:k], files[k:]
 
-def train(cfg:CFG):
-    patt=os.path.join(cfg.root,'session_*/user_*/phrase_*/rep_*/data.h5')
-    files=sorted(glob.glob(patt))
-    if not files: raise FileNotFoundError('No h5 found')
-    tr,va=_split(files,cfg.val)
-    pin=torch.cuda.is_available(); dev=torch.device('cuda' if pin else 'cpu')
+    # DataLoaders
+    pin = (dev.type == 'cuda')
     dl_tr = DataLoader(
         GForceTrialDataset(tr),
         batch_size=cfg.batch,
@@ -109,46 +111,86 @@ def train(cfg:CFG):
         collate_fn=collate,
         pin_memory=pin
     )
-    net=SignNet(cfg.classes, use_wavelets=True).to(dev); opt=torch.optim.AdamW(net.parameters(),cfg.lr,weight_decay=cfg.wd); ce=nn.CrossEntropyLoss()
-    best,bad=float('inf'),0
-    for ep in range(1,cfg.epochs+1):
-        net.train(); tl=0
-        for b,y in dl_tr:
-            b=[t.to(dev) for t in b]; y=y.to(dev)
-            opt.zero_grad(); loss=ce(net(b),y); loss.backward(); opt.step(); tl+=loss.item()*y.size(0)
-        tl/=len(tr)
-        net.eval(); vl=cor=0
+
+    # Modelo y optimizador
+    net = SignNet(cfg.classes, use_wavelets=True).to(dev)
+    opt = torch.optim.AdamW(net.parameters(), lr=cfg.lr, weight_decay=cfg.wd)
+    ce  = nn.CrossEntropyLoss()
+
+    # Entrenamiento
+    best_loss, bad = float('inf'), 0
+    for ep in range(1, cfg.epochs + 1):
+        net.train(); tl = 0
+        for b, y in dl_tr:
+            b = [t.to(dev) for t in b]
+            y = y.to(dev)
+            opt.zero_grad()
+            loss = ce(net(b), y)
+            loss.backward()
+            opt.step()
+            tl += loss.item() * y.size(0)
+        tl /= len(tr)
+
+        net.eval(); vl = cor = 0
         with torch.no_grad():
-            for b,y in dl_va:
-                b=[t.to(dev) for t in b]; y=y.to(dev); log=net(b)
-                vl+=ce(log,y).item()*y.size(0); cor+=(log.argmax(1)==y).sum().item()
-        vl/=len(va); acc=100*cor/len(va)
-        print(f'[ep {ep}/{cfg.epochs}] tl={tl:.3f} vl={vl:.3f} acc={acc:.1f}%')
-        if vl<best-1e-4:
-            best, bad = vl, 0
-            torch.save({'state_dict':net.state_dict(),'num_classes':cfg.classes},'best_signnet.pt')
+            for b, y in dl_va:
+                b = [t.to(dev) for t in b]
+                y = y.to(dev)
+                out = net(b)
+                vl += ce(out, y).item() * y.size(0)
+                cor += (out.argmax(1) == y).sum().item()
+        vl /= len(va)
+        acc = 100 * cor / len(va)
+        print(f"[ep {ep}/{cfg.epochs}] tl={tl:.3f} vl={vl:.3f} acc={acc:.1f}%")
+
+        # Guardado del mejor modelo
+        if vl < best_loss - 1e-4:
+            best_loss, bad = vl, 0
+            torch.save({'state_dict': net.state_dict(), 'num_classes': cfg.classes}, 'best_signnet.pt')
         else:
-            bad+=1
-            if bad>=cfg.patience: print('early stop'); break
+            bad += 1
+            if bad >= cfg.patience:
+                print('Early stopping')
+                break
 
 ###############################################################################
-# 7. CLI
+# 7. CLI + CUDA por defecto
 ###############################################################################
-if __name__=='__main__':
-    ap=argparse.ArgumentParser(description='SignNet trainer (gForcePro+)')
-    ap.add_argument('--root',   required=True)
-    ap.add_argument('--classes',required=True,type=int)
-    ap.add_argument('--batch',  type=int, default=16)
-    ap.add_argument('--epochs', type=int, default=50)
-    ap.add_argument('--lr',     type=float, default=1e-3)
-    ap.add_argument('--val',    type=float, default=0.2)
-    ap.add_argument('--patience',type=int, default=8)
-    ap.add_argument('--workers', type=int, default=4)
-    ap.add_argument('--wd',     type=float, default=1e-4)
-    ap.add_argument("--emg-rate", type=int, default=500,
-                   help="Frecuencia EMG para preprocesado (Hz)")
-    args=ap.parse_args()
-    cfg=CFG(root=args.root, classes=args.classes, batch=args.batch, workers=args.workers,
-            epochs=args.epochs, lr=args.lr, val=args.val, patience=args.patience, wd=args.wd,
-            emg_rate=args.emg_rate)
-    train(cfg)
+if __name__ == '__main__':
+    set_seed()
+    ap = argparse.ArgumentParser(description='SignNet trainer (gForcePro+)')
+    ap.add_argument('--root',    required=True)
+    ap.add_argument('--classes', required=True, type=int)
+    ap.add_argument('--batch',   type=int,   default=16)
+    ap.add_argument('--epochs',  type=int,   default=50)
+    ap.add_argument('--lr',      type=float, default=1e-3)
+    ap.add_argument('--val',     type=float, default=0.2)
+    ap.add_argument('--patience',type=int,   default=8)
+    ap.add_argument('--workers', type=int,   default=4)
+    ap.add_argument('--wd',      type=float, default=1e-4)
+    ap.add_argument('--emg-rate',type=int,   default=500,
+                   help='Frecuencia EMG para preprocesado (Hz)')
+    ap.add_argument('--device', choices=['auto','cuda','cpu'], default='auto',
+                   help="Dispositivo para entrenar: 'cuda','cpu' o 'auto' (por defecto cuda si está disponible)")
+    args = ap.parse_args()
+
+    # Selección de dispositivo
+    if args.device == 'auto':
+        dev = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+    else:
+        dev = torch.device(args.device)
+    print(f"Usando dispositivo: {dev}")
+
+    cfg = CFG(
+        root=args.root,
+        classes=args.classes,
+        batch=args.batch,
+        workers=args.workers,
+        epochs=args.epochs,
+        lr=args.lr,
+        val=args.val,
+        patience=args.patience,
+        wd=args.wd,
+        emg_rate=args.emg_rate
+    )
+    train(cfg, dev)
