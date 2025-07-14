@@ -56,9 +56,9 @@ async def wait_for_space(prompt: str):
     await loop.run_in_executor(None, _sync_wait_space)
 
 # ------------------------------------------------
-# 3. Almacenamiento en HDF5 con chunking dinámico
+# 3. Almacenamiento en HDF5 con nueva estructura
 # ------------------------------------------------
-def process_and_store(phrase_id, user_id, session_id, rep):
+def process_and_store(gesture: str, session_id: int, sample: int):
     if not buf_emg or not buf_acc or not buf_gyr or not buf_euler or not buf_quat:
         print("❌ Datos insuficientes. Saltando guardado.")
         return
@@ -69,21 +69,20 @@ def process_and_store(phrase_id, user_id, session_id, rep):
     euler_arr = np.array(buf_euler)
     quat_arr  = np.array(buf_quat)
 
-    out_dir = os.path.join("data",
-        f"session_{session_id}",
-        f"user_{user_id}",
-        f"phrase_{phrase_id}",
-        f"rep_{rep:02d}"
-    )
+    # Directorio base: data/{gesture}
+    out_dir = os.path.join("data", gesture)
     os.makedirs(out_dir, exist_ok=True)
-    out_path = os.path.join(out_dir, "data.h5")
+    # Archivo: session_{SS}_sample_{NN}.h5
+    out_path = os.path.join(
+        out_dir,
+        f"session_{session_id:02d}_sample_{sample:02d}.h5"
+    )
 
     with h5py.File(out_path, 'w') as f:
         # Metadatos
-        f.attrs['phrase_id']  = str(phrase_id)
-        f.attrs['user_id']    = str(user_id)
-        f.attrs['session_id'] = str(session_id)
-        f.attrs['rep']        = rep
+        f.attrs['gesture']    = str(gesture)
+        f.attrs['session_id'] = session_id
+        f.attrs['sample']     = sample
 
         grp = f.create_group('raw')
         # Configurar chunks dinámicamente (filas, columnas)
@@ -102,7 +101,7 @@ def process_and_store(phrase_id, user_id, session_id, rep):
         create_ds('euler', euler_arr)
         create_ds('quat',  quat_arr)
 
-    print(f"✔ Rep {rep} almacenada en {out_path}")
+    print(f"✔ Sample {sample} almacenada en {out_path}")
 
 # ------------------------------------------------
 # 4. Captura con calibración y control ESPACIO
@@ -115,7 +114,7 @@ async def capture_loop(args):
     await prof.calibrate_quaternion(duration=2.0)
     print("Calibración completada.")
 
-    await prof.setEmgRawDataConfig(args.emg_rate, 0xFF, 16, 8, cb=None, timeout=1000)
+    await prof.setEmgRawDataConfig(DEFAULT_EMG_RATE, 0xFF, 16, 8, cb=None, timeout=1000)
     flags = (
         DataNotifFlags.DNF_EMG_RAW
       | DataNotifFlags.DNF_ACCELERATE
@@ -129,8 +128,8 @@ async def capture_loop(args):
     await client.start_notify(prof.notifyCharacteristic, on_data_raw)
 
     try:
-        for rep in range(1, args.reps + 1):
-            print(f"\n=== Repetición {rep}/{args.reps} ===")
+        for sample in range(1, args.samples + 1):
+            print(f"\n=== Muestra {sample}/{args.samples} ===")
             await wait_for_space("Presiona ESPACIO para iniciar...")
             buf_emg.clear(); buf_acc.clear()
             buf_gyr.clear(); buf_euler.clear(); buf_quat.clear()
@@ -139,10 +138,9 @@ async def capture_loop(args):
             await wait_for_space("")
 
             process_and_store(
-                phrase_id  = args.phrase,
-                user_id    = args.user,
+                gesture    = args.gesture,
                 session_id = args.session,
-                rep        = rep
+                sample     = sample
             )
     finally:
         await client.stop_notify(prof.notifyCharacteristic)
@@ -158,20 +156,16 @@ async def capture_loop(args):
 # ------------------------------------
 def main():
     p = argparse.ArgumentParser(
-        description="Captura IMU + sEMG y almacena en HDF5 con chunking dinámico"
+        description="Captura IMU + sEMG y almacena en HDF5 con nueva estructura de directorios"
     )
     p.add_argument("--address",  default=DEFAULT_ADDRESS,
                    help="BLE MAC/UUID del brazalete")
-    p.add_argument("--user",     default="1",
-                   help="ID de usuario (default: 1)")
-    p.add_argument("--phrase",   default="1",
-                   help="ID de frase/gesto (default: 1)")
-    p.add_argument("--session",  default="1",
-                   help="ID de sesión (default: 1)")
-    p.add_argument("--reps",     type=int, default=10,
-                   help="Número de repeticiones (default: 1)")
-    p.add_argument("--emg-rate", type=int, default=DEFAULT_EMG_RATE,
-                   help="Frecuencia EMG (Hz), entre 250-500 (default:500)")
+    p.add_argument("--gesture", required=True,
+                   help="Nombre del gesto (obligatorio)")
+    p.add_argument("--session",  type=int, required=True,
+                   help="ID de sesión (obligatorio)")
+    p.add_argument("--samples",  type=int, default=10,
+                   help="Número de muestras (default: 10)")
     args = p.parse_args()
 
     asyncio.run(capture_loop(args))
