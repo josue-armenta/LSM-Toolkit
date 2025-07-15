@@ -7,7 +7,7 @@ Autor: ChatGPT – julio 2025
 """
 
 import argparse
-import asyncio
+import asyncio, contextlib, sys
 import collections
 import struct
 import time
@@ -19,6 +19,15 @@ import torch.nn as nn
 
 from model import SignNet
 from gforce import DataNotifFlags, GForceProfile, NotifDataType
+import cv2, numpy as np
+
+# ---------- parámetros GUI ----------
+WIN_NAME   = "LSM → Español"
+CANVAS     = (250, 800)       # alto, ancho ─ ajusta a tu gusto
+FONT       = cv2.FONT_HERSHEY_DUPLEX
+FONTSCALE  = 2
+THICKNESS  = 3
+COLOR      = (255, 255, 255)  # blanco
 
 # Parámetros de señal y buffers
 DEFAULT_ADDRESS = "90:7B:C6:63:4C:B8"
@@ -133,6 +142,8 @@ async def inference_loop(
     pred_buffer = collections.deque(maxlen=window_size)
     conf_buffer = collections.deque(maxlen=window_size)
     prev_out = None
+    # Ventana OpenCV (una vez)
+    cv2.namedWindow(WIN_NAME, cv2.WINDOW_AUTOSIZE)
 
     print(f"➡️ Post-proceso: método={smoother}, ventana={window_size}, umbral={conf_thresh}")
 
@@ -214,6 +225,19 @@ async def inference_loop(
                 print(f"\r[VOTE] preds={list(pred_buffer)} counts={counts} → {out_pred} ({out_conf:.2f})", end="", flush=True)
         elif out_pred != prev_out:
             print(f"\r⏩ {label:<15} ({out_conf:.2f})            ", end="", flush=True)
+            
+            # ---------- NUEVO: mostrar texto ----------
+            canvas = np.zeros((*CANVAS, 3), dtype=np.uint8)
+            text = f"{label}  ({out_conf*100:.0f} %)"
+            # centra horizontalmente 
+            size = cv2.getTextSize(text, FONT, FONTSCALE, THICKNESS)[0]
+            x = (CANVAS[1] - size[0]) // 2
+            y = (CANVAS[0] + size[1]) // 2
+            cv2.putText(canvas, text, (x, y), FONT, FONTSCALE,
+                        COLOR, THICKNESS, cv2.LINE_AA)
+            cv2.imshow(WIN_NAME, canvas)
+            cv2.waitKey(1)
+            
             prev_out = out_pred
 
 async def run(args):
@@ -249,6 +273,7 @@ async def run(args):
         await prof.device.stop_notify(prof.notifyCharacteristic)
         await prof.stopDataNotification()
         await prof.disconnect()
+        cv2.destroyWindow(WIN_NAME)
 
 def main():
     p = argparse.ArgumentParser(
@@ -271,7 +296,15 @@ def main():
     p.add_argument("--alpha", type=float, default=0.2,
                    help="Factor de olvido de la EMA (0<α≤1)")
     args = p.parse_args()
-    asyncio.run(run(args))
+    
+    with contextlib.suppress(KeyboardInterrupt):
+        asyncio.run(run(args))
+    print("\n🛑 Interrupción recibida. Saliendo…")
+    try:
+        cv2.destroyAllWindows()
+    except ImportError:
+        pass
+    sys.exit(0)
 
 if __name__ == "__main__":
     main()
