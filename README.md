@@ -1,162 +1,197 @@
-# LSM‑Toolkit
+# LSM‑Toolkit (v2025‑07)
 
-> **Pipeline completo para capturar, entrenar e inferir gestos de la *Lengua de Señas Mexicana* (LSM) usando el brazalete **Oymotion gForce Pro+**. Incluye captura de señales **sEMG + IMU**, entrenamiento de redes neuronales y traducción en tiempo real.**
+**Pipeline de captura, entrenamiento y traducción de gestos de la *Lengua de Señas Mexicana* (LSM) usando el brazalete Oymotion gForce Pro+.**
 
----
-
-## Índice
-
-1. [Descripción general](#descripción-general)
-2. [Requisitos](#requisitos)
-3. [Instalación](#instalación)
-4. [Estructura de carpetas](#estructura-de-carpetas)
-5. [Flujo de trabajo](#flujo-de-trabajo)
-
-   1. [Captura de datos (`capture.py`)](#1-captura-de-datos-capturepy)
-   2. [Entrenamiento (`trainer.py`)](#2-entrenamiento-trainerpy)
-   3. [Traducción en tiempo real (`translator.py`)](#3-traducción-en-tiempo-real-translatorpy)
-6. [Detalles de preprocesamiento y modelo](#detalles-de-preprocesamiento-y-modelo)
-7. [Contribución](#contribución)
-8. [Licencia](#licencia)
+<div align="center">
+  <img src="https://img.shields.io/badge/python-3.9%2B-blue" alt="Python 3.9+">
+  <img src="https://img.shields.io/badge/pytorch-%E2%89%A5%202.0-lightgrey" alt="PyTorch ≥ 2.0">
+  <img src="https://img.shields.io/badge/license-MIT-green" alt="MIT License">
+</div>
 
 ---
 
-## Descripción general
-
-LSM‑Toolkit automatiza el ciclo completo necesario para reconocer gestos de la Lengua de Señas Mexicana a partir de señales musculares (**sEMG**) y movimiento (**IMU**):
-
-```mermaid
-graph LR;
-    subgraph Adquisición
-        A[gForce Pro+]
-        B[capture.py]
-    end
-    subgraph Dataset
-        C[data/*.h5]
-    end
-    subgraph Aprendizaje
-        D[trainer.py]
-        E[best_signnet.pt]
-    end
-    subgraph Inferencia
-        F[translator.py]
-    end
-
-    A -- BLE --> B --> C --> D --> E --> F
-```
-
-* **`capture.py`**: graba señales crudas EMG (250 Hz) y sensores inerciales (IMU, 100 Hz), las sincroniza y almacena en archivos **HDF5** con metadatos.
-* **`trainer.py`**: construye un conjunto de datos a partir de los H5, aplica una capa de preprocesado y entrena una red híbrida CNN + Bi‑LSTM con atención.
-* **`translator.py`**: recibe streaming directo del brazalete, aplica el mismo preprocesado y emite la clase de gesto más probable cada *n* segundos.
-
----
-
-## Requisitos
-
-| Componente          | Versión sugerida          |
-| ------------------- | ------------------------- |
-| Python              | ≥ 3.9                     |
-| PyTorch             | ≥ 2.0 (con CUDA opcional) |
-| NumPy, h5py, tqdm   | —                         |
-| Oymotion gForce SDK | probada con *v0.12.0*     |
-
-> Instala dependencias con:
->
-> ```bash
-> pip install -r requirements.txt  # Ajusta según tu entorno
-> ```
+## Índice rápido
+1. [Instalación](#instalación)
+2. [Estructura de carpetas](#estructura-de-carpetas)
+3. [Captura de datos](#captura-de-datos)
+4. [Entrenamiento](#entrenamiento)
+5. [Traducción en tiempo real](#traducción-en-tiempo-real)
+6. [Modelo y preprocesamiento](#modelo-y-preprocesamiento)
+7. [Aumento de datos](#aumento-de-datos)
+8. [Preguntas frecuentes](#preguntas-frecuentes)
+9. [Contribución](#contribución)
+10. [Licencia](#licencia)
 
 ---
 
 ## Instalación
 
-1. **Clona** este repositorio y entra al directorio:
+```bash
+# 1. clona el repositorio
+git clone https://github.com/josue-armenta/LSM-Toolkit.git
+cd LSM-Toolkit
 
-   ```bash
-   git clone https://github.com/josue-armenta/lsm-toolkit.git
-   cd lsm-toolkit
-   ```
-2. **Configura** un entorno virtual (opcional pero recomendado).
-3. **Instala** dependencias Python (ver arriba).
-4. **Conecta** tu brazalete gForce Pro+ vía Bluetooth antes de continuar.
+# 2. (opcional) crea un entorno virtual
+python -m venv .venv && source .venv/bin/activate
+
+# 3. instala dependencias
+pip install -r requirements.txt   # incluye tsaug, pywavelets, bleak, etc.
+```
+
+> **Requisitos mínimos**  
+> • Python ≥ 3.9 • PyTorch ≥ 2.0 (CUDA opcional) • gForce Pro+ vía BLE
 
 ---
 
 ## Estructura de carpetas
 
 ```
-lsm-toolkit/
-├── capture.py
-├── gforce.py
-├── trainer.py
-├── translator.py
-├── preprocessor.py
-└── requirements.txt
+LSM-Toolkit/
+├── capture.py          # grabación BLE → HDF5
+├── trainer.py          # entrenamiento SignNet
+├── translator.py       # inferencia continua
+├── augment.py          # data‑augmentation tsaug
+├── model.py            # CNN‑BiLSTM‑Attention (+Wavelets)
+├── preprocessor.py     # alineación, resampleo, denoise
+├── gforce.py           # wrapper BLE gForce SDK
+├── requirements.txt
+└── data/
+    └── <gesture>/
+        ├── session_01_sample_01.h5
+        ├── session_01_sample_02.h5
+        └── …
 ```
 
-Cada archivo **data.h5** contiene cinco *datasets* (`emg`, `acc`, `gyro`, `euler`, `quat`) dentro de un grupo `raw/`, además de atributos para `phrase_id`, `user_id`, `session_id` y `rep`.
+Cada archivo **`.h5`** contiene un grupo `raw/` con `emg`, `acc`, `gyro`, `euler`, `quat`
+y los atributos HDF5:
+
+| Atributo | Tipo | Descripción |
+|----------|------|-------------|
+| `gesture` | `str` | Nombre textual del gesto |
+| `session_id` | `int` | ID de la sesión de captura |
+| `sample` | `int` | N.º consecutivo dentro de la sesión |
 
 ---
 
-## Flujo de trabajo
-
-### 1. Captura de datos (`capture.py`)
+## Captura de datos
 
 ```bash
-python capture.py \
-  --user 1 --phrase 3 --session 1 --reps 10 \
-  --address 90:7B:C6:63:4C:B8 --emg-rate 250
+python capture.py   --gesture hola   --session 1   --samples 15   --address 90:7B:C6:63:4C:B8
 ```
 
-* Presiona **ESPACIO** para iniciar y detener cada repetición.
-* Los archivos H5 se guardan en `data/session_*/user_*/phrase_*/rep_*/data.h5`.
+| Flag          | Tipo   | Predeterminado           | Descripción |
+|---------------|--------|--------------------------|-------------|
+| `--gesture`   | str    | — (obligatorio)          | Nombre del gesto |
+| `--session`   | int    | — (obligatorio)          | ID de la sesión |
+| `--samples`   | int    | `10`                     | Cantidad de capturas a grabar |
+| `--address`   | str    | `90:7B:C6:63:4C:B8`      | MAC/UUID BLE gForce |
 
-### 2. Entrenamiento (`trainer.py`)
-
-```bash
-python trainer.py --root data \
-  --classes 3 --epochs 40 --batch 32
-```
-
-* Divide automáticamente el dataset en entrenamiento/validación (80 / 20 %).
-* Guarda el mejor modelo en `best_signnet.pt` (incluye `num_classes`).
-
-### 3. Traducción en tiempo real (`translator.py`)
-
-```bash
-python translator.py \
-  --model best_signnet.pt --labels labels.txt \
-  --address 90:7B:C6:63:4C:B8 --interval 0.2
-```
-
-* Muestra por consola la clase reconocida y su confianza.
-* Con `--debug` imprime el *top‑3* de probabilidades y la varianza EMG.
+> *La frecuencia EMG se fija internamente a **500 Hz**; IMU a **100 Hz**.  
+> Presiona **ESPACIO** para iniciar/detener cada muestra.*
 
 ---
 
-## Detalles de preprocesamiento y modelo
+## Entrenamiento
 
-| Paso                       | Descripción                                                           |
-| -------------------------- | --------------------------------------------------------------------- |
-| **Interpolación temporal** | `PreprocessLayer` re‑muestra EMG a 100 Hz para alinear con IMU.       |
-| **Concatenación**          | Se combina EMG (8 canales) + IMU (13 features) → tensor `(B, 21, T)`. |
-| **Extractores**            | 2× CNN 1‑D + BN + ReLU para aprender representaciones locales.        |
-| **Secuencial**             | Bi‑LSTM (2 capas, 64 u.) captura dependencias temporales.             |
-| **Atención**               | Pondera la secuencia para obtener un *context vector*.                |
-| **Clasificador**           | Capa fully‑connected a `num_classes`.                                 |
+```bash
+python trainer.py   --root data   --gestures hola adios gracias   --epochs 60   --batch 32   --device auto
+```
+
+Argumentos principales:
+
+| Flag          | Tipo        | Predeterminado | Descripción |
+|---------------|-------------|---------------|-------------|
+| `--root`      | str         | `data`        | Carpeta raíz del dataset |
+| `--gestures`  | lista str   | *infiere*     | Lista de gestos (orden) |
+| `--epochs`    | int         | `50`          | Épocas de entrenamiento |
+| `--batch`     | int         | `16`          | Tamaño de lote |
+| `--lr`        | float       | `1e-3`        | Learning‑rate |
+| `--val`       | float       | `0.2`         | Proporción validación |
+| `--patience`  | int         | `8`           | Early‑stopping |
+| `--device`    | `cuda/cpu/auto` | `auto`   | Dispositivo de cómputo |
+
+Genera **`best_signnet.pt`** que incluye pesos y lista de gestos –
+no necesitas un archivo `labels.txt` separado.
+
+---
+
+## Traducción en tiempo real
+
+```bash
+python translator.py   --model best_signnet.pt   --address 90:7B:C6:63:4C:B8   -w 7   -t 0.8   -s ma   --interval 0.15   --debug
+```
+
+| Flag / alias      | Descripción |
+|-------------------|-------------|
+| `--model`         | Checkpoint entrenado |
+| `--interval`      | Segundos entre inferencias |
+| `-w/--window-size`| Tamaño de ventana para post‑procesado |
+| `-t/--conf-thresh`| Umbral de confianza (0–1) |
+| `-s/--smoother`   | `ma` media‑móvil ó `vote` |
+| `--debug`         | Imprime info detallada |
+
+---
+
+## Modelo y preprocesamiento
+
+```text
+┌───────────────┐   Wavelet denoise (opcional)
+│ PreprocessLayer│──► Resample EMG →100 Hz
+└───────────────┘       Concatenación EMG+IMU = 21ch
+        │
+   1‑D CNN ×2
+        │
+     Bi‑LSTM ×2
+        │
+  Atención global
+        │
+   Softmax cls.
+```
+
+Parámetros clave (`model.py`):
+
+| Parámetro     | Valor por defecto |
+|---------------|------------------|
+| `conv_ch`     | `(64, 128)`      |
+| `lstm_hidden` | `64`             |
+| `use_wavelets`| `False`          |
+
+---
+
+## Aumento de datos
+
+```python
+from augment import AUG_PIPE
+```
+
+*Pipeline `tsaug` aplicado **solo** en entrenamiento*:
+
+- `AddNoise(scale=0.02)`  
+- `TimeWarp(max_speed_ratio=1.1)`  
+- `Drift(max_drift=(0.05, 0.05))`
+
+Desactívalo pasando `augment=False` en `GForceTrialDataset`.
+
+---
+
+## Preguntas frecuentes
+
+| Problema | Solución |
+|----------|----------|
+| **No conecta el brazalete** | Verifica permisos BLE y la MAC (`bluetoothctl devices`). |
+| **`pywavelets` no se instala** | `pip install --only-binary :all: pywavelets` o instala *build‑essential*. |
+| **CUDA no detectada** | Instala el *wheel* de PyTorch con soporte `+cu118` y ejecuta `trainer.py --device cuda`. |
 
 ---
 
 ## Contribución
 
-¡Se agradecen *issues* y *pull requests*!
-
-1. Haz *fork* y crea una rama descriptiva.
-2. Sigue el estilo de código (PEP‑8) y añade pruebas si procede.
-3. Crea una *pull request* detallando cambios y motivación.
+1. Haz **fork** y crea una rama descriptiva.  
+2. Sigue PEP‑8 y añade pruebas si procede.  
+3. Abre un **pull request** detallando cambios y motivación.
 
 ---
 
 ## Licencia
 
-Distribuido bajo la licencia MIT. Consulta el archivo [LICENSE](LICENSE) para más información.
+Distribuido bajo licencia **MIT** – consulta `LICENSE` para más información.
