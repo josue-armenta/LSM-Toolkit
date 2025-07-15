@@ -118,7 +118,8 @@ async def inference_loop(
     debug: bool,
     window_size: int,
     conf_thresh: float,
-    smoother: str
+    smoother: str,
+    alpha: float
 ):
     """
     Ejecuta inferencias cada `interval` s, acumula las últimas
@@ -128,6 +129,7 @@ async def inference_loop(
     Sólo emite si la confianza ≥ conf_thresh.
     """
     prob_buffer = collections.deque(maxlen=window_size)
+    ema_probs = None
     pred_buffer = collections.deque(maxlen=window_size)
     conf_buffer = collections.deque(maxlen=window_size)
     prev_out = None
@@ -167,11 +169,23 @@ async def inference_loop(
         prob_buffer.append(probs)
         pred_buffer.append(pred)
         conf_buffer.append(conf)
+        
+        # ---------- NEW: update EMA ----------
+        if smoother == "ema":
+            if ema_probs is None:
+                ema_probs = probs.clone()
+            else:
+                ema_probs = alpha * probs + (1 - alpha) * ema_probs
+        
         if len(pred_buffer) < window_size:
             continue
 
         # Selección post-proceso
-        if smoother == "ma":
+        if smoother == "ema":
+            out_probs = ema_probs
+            out_pred  = int(out_probs.argmax().item())
+            out_conf  = float(out_probs[out_pred].item())
+        elif smoother == "ma":
             avg_probs = torch.stack(list(prob_buffer), dim=0).mean(dim=0)
             out_pred = int(avg_probs.argmax().item())
             out_conf = float(avg_probs[out_pred].item())
@@ -227,7 +241,7 @@ async def run(args):
         await inference_loop(
             model, device, labels,
             args.interval, args.debug,
-            args.window_size, args.conf_thresh, args.smoother
+            args.window_size, args.conf_thresh, args.smoother, args.alpha
         )
     except (KeyboardInterrupt, asyncio.CancelledError):
         print("\n🛑 Terminando…")
@@ -250,10 +264,12 @@ def main():
                    help="Muestra info de depuración")
     p.add_argument("-w", "--window-size", type=int, default=5,
                    help="Tamaño de ventana para MA/votación")
-    p.add_argument("-t", "--conf-thresh", type=float, default=0.7,
+    p.add_argument("-t", "--conf-thresh", type=float, default=0.75,
                    help="Umbral de confianza mínimo para emitir clase")
-    p.add_argument("-s", "--smoother", choices=["ma","vote"], default="vote",
-                   help="Método de post-proceso: 'ma' o 'vote'")
+    p.add_argument("--smoother", choices=["ma","vote","ema"], default="ema",
+                   help="Método de post‑proceso")
+    p.add_argument("--alpha", type=float, default=0.2,
+                   help="Factor de olvido de la EMA (0<α≤1)")
     args = p.parse_args()
     asyncio.run(run(args))
 
